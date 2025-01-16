@@ -7,9 +7,10 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"pkg"
 	"strings"
 	"time"
+	
+	"github.com/slipperypenguin/flipboard-scraper/pkg"
 )
 
 func main() {

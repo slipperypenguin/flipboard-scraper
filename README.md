@@ -42,3 +42,9 @@ You can also use the scraper with multiple URLs and configure its behavior:
 ./flipboard-scraper -urls="https://flipboard.com/magazine1,https://flipboard.com/magazine2" -concurrent=3 -rate-limit=2 -timeout=180
 ```
 
+
+Build an executable
+```
+go build -o bin/flipboard-scraper ./cmd/flipboard-scraper
+```
+
