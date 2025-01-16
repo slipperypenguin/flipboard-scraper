@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,8 @@ type ScraperConfig struct {
 	RequestsPerSecond float64
 	// Timeout is the maximum time to wait for scraping to complete
 	Timeout time.Duration
+	// Debug enables verbose logging
+	Debug bool
 }
 
 // DefaultConfig returns the default scraper configuration
@@ -29,6 +32,7 @@ func DefaultConfig() ScraperConfig {
 		ConcurrentRequests: 3,
 		RequestsPerSecond:  1.0,
 		Timeout:            2 * time.Minute,
+		Debug:              true,
 	}
 }
 
@@ -55,6 +59,19 @@ func NewMagazineScraper(config ScraperConfig) *MagazineScraper {
 		colly.MaxDepth(1),
 	)
 
+	// Only enable debug logging if configured
+	if config.Debug {
+		c.OnRequest(func(r *colly.Request) {
+			log.Printf("[Scraper Debug] Making request to: %v", r.URL)
+		})
+		c.OnResponse(func(r *colly.Response) {
+			log.Printf("[Scraper Debug] Got response from: %v (status: %d, length: %d)", r.Request.URL, r.StatusCode, len(r.Body))
+		})
+		c.OnError(func(r *colly.Response, err error) {
+			log.Printf("[Scraper Debug] Error on %v: %v", r.Request.URL, err)
+		})
+	}
+
 	// Set up rate limiting
 	limiter := rate.NewLimiter(rate.Limit(config.RequestsPerSecond), 1)
 
@@ -69,6 +86,10 @@ func NewMagazineScraper(config ScraperConfig) *MagazineScraper {
 func (s *MagazineScraper) ScrapeURLs(ctx context.Context, urls []string) ([]Article, error) {
 	if len(urls) == 0 {
 		return nil, errors.New("no URLs provided")
+	}
+
+	if s.config.Debug {
+		log.Printf("[Scraper] Starting to scrape %d URLs", len(urls))
 	}
 
 	// Create a context with timeout
@@ -93,10 +114,21 @@ func (s *MagazineScraper) ScrapeURLs(ctx context.Context, urls []string) ([]Arti
 				return fmt.Errorf("rate limiter wait failed: %w", err)
 			}
 
+			if s.config.Debug {
+				log.Printf("[Scraper] Starting to scrape URL: %s", url)
+			}
+
 			// Scrape single URL
 			pageArticles, err := s.scrapeURL(ctx, url)
 			if err != nil {
+				if s.config.Debug {
+					log.Printf("[Scraper] Error scraping %s: %v", url, err)
+				}
 				return fmt.Errorf("failed to scrape %s: %w", url, err)
+			}
+
+			if s.config.Debug {
+				log.Printf("[Scraper] Found %d articles on %s", len(pageArticles), url)
 			}
 
 			// Safely append results
@@ -111,6 +143,10 @@ func (s *MagazineScraper) ScrapeURLs(ctx context.Context, urls []string) ([]Arti
 	// Wait for all goroutines to complete
 	if err := g.Wait(); err != nil {
 		return articles, fmt.Errorf("scraping error: %w", err)
+	}
+
+	if s.config.Debug {
+		log.Printf("[Scraper] Completed scraping. Total articles found: %d", len(articles))
 	}
 
 	return articles, nil
@@ -133,6 +169,10 @@ func (s *MagazineScraper) scrapeURL(ctx context.Context, url string) ([]Article,
 
 	// Set up callbacks
 	s.collector.OnHTML("article.item", func(e *colly.HTMLElement) {
+		if s.config.Debug {
+			log.Printf("[Scraper] Found article element on page: %s", url)
+		}
+
 		article := Article{
 			Title:   cleanText(e.ChildText("h3")),
 			URL:     e.ChildAttr("a", "href"),
@@ -142,20 +182,41 @@ func (s *MagazineScraper) scrapeURL(ctx context.Context, url string) ([]Article,
 
 		// Only add articles with at least a title
 		if article.Title != "" {
+			if s.config.Debug {
+				log.Printf("[Scraper] Found article: %s", article.Title)
+			}
 			articles = append(articles, article)
+		} else if s.config.Debug {
+			log.Printf("[Scraper] Skipped article with empty title")
+		}
+	})
+
+	// Log when we receive the response
+	s.collector.OnResponse(func(r *colly.Response) {
+		if s.config.Debug {
+			log.Printf("[Scraper] Received response from %s: status=%d, length=%d", url, r.StatusCode, len(r.Body))
 		}
 	})
 
 	// Set up error handling
 	s.collector.OnError(func(r *colly.Response, err error) {
 		scrapeErr = fmt.Errorf("request failed with status %d: %w", r.StatusCode, err)
+		if s.config.Debug {
+			log.Printf("[Scraper] Error on %s: %v", url, scrapeErr)
+		}
 	})
 
 	// Start scraping in a goroutine
 	go func() {
+		if s.config.Debug {
+			log.Printf("[Scraper] Starting visit to %s", url)
+		}
 		err := s.collector.Visit(url)
 		if err != nil {
 			scrapeErr = fmt.Errorf("failed to start scraping: %w", err)
+			if s.config.Debug {
+				log.Printf("[Scraper] Visit error on %s: %v", url, err)
+			}
 		}
 		s.collector.Wait()
 		close(done)

@@ -21,6 +21,7 @@ func main() {
 		concurrent     = flag.Int("concurrent", 3, "Maximum number of concurrent requests")
 		rateLimit      = flag.Float64("rate-limit", 1.0, "Maximum requests per second")
 		timeoutSeconds = flag.Int("timeout", 120, "Timeout in seconds")
+		debug          = flag.Bool("debug", true, "Enable debug logging")
 	)
 
 	flag.Parse()
@@ -47,6 +48,7 @@ func main() {
 		ConcurrentRequests: *concurrent,
 		RequestsPerSecond:  *rateLimit,
 		Timeout:           time.Duration(*timeoutSeconds) * time.Second,
+		Debug:            *debug,
 	}
 	scraper := pkg.NewMagazineScraper(config)
 
@@ -54,6 +56,10 @@ func main() {
 	urlList := strings.Split(*urls, ",")
 	for i, url := range urlList {
 		urlList[i] = strings.TrimSpace(url)
+	}
+
+	if *debug {
+		log.Printf("Starting scrape of URLs: %v", urlList)
 	}
 
 	// Scrape URLs
