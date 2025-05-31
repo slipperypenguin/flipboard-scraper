@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -54,10 +55,28 @@ type MagazineScraper struct {
 
 // NewMagazineScraper creates a new scraper instance with the given configuration
 func NewMagazineScraper(config ScraperConfig) *MagazineScraper {
+	// Set up HTTP client with timeouts
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second, // Individual request timeout
+		Transport: &http.Transport{
+			DisableKeepAlives:   true,
+			IdleConnTimeout:     30 * time.Second,
+			TLSHandshakeTimeout: 10 * time.Second,
+			DisableCompression:  false,
+			MaxIdleConns:        config.ConcurrentRequests,
+			MaxIdleConnsPerHost: config.ConcurrentRequests,
+		},
+	}
+
 	c := colly.NewCollector(
-		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
+		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
 		colly.MaxDepth(1),
+		colly.AllowURLRevisit(),
 	)
+
+	// Configure the collector
+	c.WithTransport(httpClient.Transport)
+	c.SetRequestTimeout(30 * time.Second)
 
 	// Only enable debug logging if configured
 	if config.Debug {
@@ -66,14 +85,17 @@ func NewMagazineScraper(config ScraperConfig) *MagazineScraper {
 		})
 		c.OnResponse(func(r *colly.Response) {
 			log.Printf("[Scraper Debug] Got response from: %v (status: %d, length: %d)", r.Request.URL, r.StatusCode, len(r.Body))
+			
+			// TODO: remove once debugging complete
+			r.Save("scrape-export.html")
 		})
 		c.OnError(func(r *colly.Response, err error) {
 			log.Printf("[Scraper Debug] Error on %v: %v", r.Request.URL, err)
 		})
 	}
 
-	// Set up rate limiting
-	limiter := rate.NewLimiter(rate.Limit(config.RequestsPerSecond), 1)
+	// Set up rate limiting with burst capacity
+	limiter := rate.NewLimiter(rate.Limit(config.RequestsPerSecond), 3) // Allow burst of 3
 
 	return &MagazineScraper{
 		collector: c,
@@ -109,34 +131,39 @@ func (s *MagazineScraper) ScrapeURLs(ctx context.Context, urls []string) ([]Arti
 	for _, url := range urls {
 		url := url // Create new variable for closure
 		g.Go(func() error {
-			// Wait for rate limiter
-			if err := s.limiter.Wait(ctx); err != nil {
-				return fmt.Errorf("rate limiter wait failed: %w", err)
-			}
-
-			if s.config.Debug {
-				log.Printf("[Scraper] Starting to scrape URL: %s", url)
-			}
-
-			// Scrape single URL
-			pageArticles, err := s.scrapeURL(ctx, url)
-			if err != nil {
-				if s.config.Debug {
-					log.Printf("[Scraper] Error scraping %s: %v", url, err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				// Wait for rate limiter
+				if err := s.limiter.Wait(ctx); err != nil {
+					return fmt.Errorf("rate limiter wait failed: %w", err)
 				}
-				return fmt.Errorf("failed to scrape %s: %w", url, err)
+
+				if s.config.Debug {
+					log.Printf("[Scraper] Starting to scrape URL: %s", url)
+				}
+
+				// Scrape single URL with retries
+				pageArticles, err := s.scrapeURLWithRetry(ctx, url, 3)
+				if err != nil {
+					if s.config.Debug {
+						log.Printf("[Scraper] Error scraping %s: %v", url, err)
+					}
+					return fmt.Errorf("failed to scrape %s: %w", url, err)
+				}
+
+				if s.config.Debug {
+					log.Printf("[Scraper] Found %d articles on %s", len(pageArticles), url)
+				}
+
+				// Safely append results
+				s.mu.Lock()
+				articles = append(articles, pageArticles...)
+				s.mu.Unlock()
+
+				return nil
 			}
-
-			if s.config.Debug {
-				log.Printf("[Scraper] Found %d articles on %s", len(pageArticles), url)
-			}
-
-			// Safely append results
-			s.mu.Lock()
-			articles = append(articles, pageArticles...)
-			s.mu.Unlock()
-
-			return nil
 		})
 	}
 
@@ -152,6 +179,36 @@ func (s *MagazineScraper) ScrapeURLs(ctx context.Context, urls []string) ([]Arti
 	return articles, nil
 }
 
+// scrapeURLWithRetry attempts to scrape a URL with retries
+func (s *MagazineScraper) scrapeURLWithRetry(ctx context.Context, url string, maxRetries int) ([]Article, error) {
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Wait before retrying
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
+			if s.config.Debug {
+				log.Printf("[Scraper] Retry attempt %d for URL: %s", attempt+1, url)
+			}
+		}
+
+		articles, err := s.scrapeURL(ctx, url)
+		if err == nil {
+			return articles, nil
+		}
+		lastErr = err
+
+		// Don't retry on certain errors
+		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "403") {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("all retry attempts failed: %w", lastErr)
+}
+
 // ScrapeURL scrapes a single Flipboard magazine URL
 func (s *MagazineScraper) ScrapeURL(ctx context.Context, url string) ([]Article, error) {
 	return s.scrapeURL(ctx, url)
@@ -165,37 +222,33 @@ func (s *MagazineScraper) scrapeURL(ctx context.Context, url string) ([]Article,
 
 	var articles []Article
 	var scrapeErr error
-	var done = make(chan bool)
+	var done = make(chan bool, 1)
 
-	// Set up callbacks
-	s.collector.OnHTML("article.item", func(e *colly.HTMLElement) {
+	// Reset collector callbacks
+	s.collector.OnHTML("a[data-source-url]", func(e *colly.HTMLElement) {
 		if s.config.Debug {
-			log.Printf("[Scraper] Found article element on page: %s", url)
+			log.Printf("[Scraper Debug] Found article: %s", e.Text)
+		}
+
+		title := cleanText(e.Text)
+		sourceURL := e.Attr("data-source-url")
+		summary := cleanText(e.Attr("data-description"))
+
+		// Skip if no title or URL
+		if title == "" || sourceURL == "" {
+			return
 		}
 
 		article := Article{
-			Title:   cleanText(e.ChildText("h3")),
-			URL:     e.ChildAttr("a", "href"),
-			Summary: cleanText(e.ChildText("p.description")),
-			Date:    time.Now(), // Flipboard doesn't always expose article dates
+			Title:   title,
+			URL:     sourceURL,
+			Summary: summary,
+			Date:    time.Now(), // Flipboard doesn't consistently expose article dates in HTML
 		}
 
-		// Only add articles with at least a title
-		if article.Title != "" {
-			if s.config.Debug {
-				log.Printf("[Scraper] Found article: %s", article.Title)
-			}
-			articles = append(articles, article)
-		} else if s.config.Debug {
-			log.Printf("[Scraper] Skipped article with empty title")
-		}
-	})
-
-	// Log when we receive the response
-	s.collector.OnResponse(func(r *colly.Response) {
-		if s.config.Debug {
-			log.Printf("[Scraper] Received response from %s: status=%d, length=%d", url, r.StatusCode, len(r.Body))
-		}
+		s.mu.Lock()
+		articles = append(articles, article)
+		s.mu.Unlock()
 	})
 
 	// Set up error handling
@@ -219,17 +272,21 @@ func (s *MagazineScraper) scrapeURL(ctx context.Context, url string) ([]Article,
 			}
 		}
 		s.collector.Wait()
-		close(done)
+		done <- true
 	}()
 
 	// Wait for either completion or context cancellation
 	select {
 	case <-ctx.Done():
-		s.collector.AllowURLRevisit = true // Reset collector state
 		return nil, fmt.Errorf("scraping cancelled: %w", ctx.Err())
 	case <-done:
 		if scrapeErr != nil {
 			return nil, scrapeErr
+		}
+		if len(articles) == 0 {
+			if s.config.Debug {
+				log.Printf("[Scraper] No articles found on %s", url)
+			}
 		}
 		return articles, nil
 	}
