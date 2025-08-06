@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"strings"
 	"time"
-	
+
 	"github.com/slipperypenguin/flipboard-scraper/pkg"
 )
 
@@ -20,8 +20,11 @@ func main() {
 		output         = flag.String("output", "articles", "Output file (without extension)")
 		concurrent     = flag.Int("concurrent", 3, "Maximum number of concurrent requests")
 		rateLimit      = flag.Float64("rate-limit", 1.0, "Maximum requests per second")
-		timeoutSeconds = flag.Int("timeout", 120, "Timeout in seconds")
-		debug          = flag.Bool("debug", true, "Enable debug logging")
+		timeoutSeconds = flag.Int("timeout", 300, "Timeout in seconds")
+		userAgent      = flag.String("user-agent", "", "User-Agent string for requests (uses default if empty)")
+		maxPages       = flag.Int("max-pages", 10, "Maximum pages to scrape per magazine (0 = unlimited)")
+		debug          = flag.Bool("debug", false, "Enable debug logging")
+		useJS          = flag.Bool("javascript", false, "Enable JavaScript rendering (requires Chrome/Chromium)")
 	)
 
 	flag.Parse()
@@ -48,8 +51,18 @@ func main() {
 		ConcurrentRequests: *concurrent,
 		RequestsPerSecond:  *rateLimit,
 		Timeout:           time.Duration(*timeoutSeconds) * time.Second,
-		Debug:            *debug,
+		MaxPages:          *maxPages,
+		Debug:             *debug,
+		UseJavaScript:     *useJS,
 	}
+
+	// Set user agent (use default if not specified)
+	if *userAgent != "" {
+		config.UserAgent = *userAgent
+	} else {
+		config.UserAgent = pkg.DefaultConfig().UserAgent
+	}
+
 	scraper := pkg.NewMagazineScraper(config)
 
 	// Split URLs and clean them
@@ -58,8 +71,10 @@ func main() {
 		urlList[i] = strings.TrimSpace(url)
 	}
 
+	fmt.Printf("Starting hybrid scraping of %d Flipboard magazine(s)...\n", len(urlList))
 	if *debug {
-		log.Printf("Starting scrape of URLs: %v", urlList)
+		fmt.Printf("Configuration: max-pages=%d, rate-limit=%.1f/sec, concurrent=%d\n", 
+			*maxPages, *rateLimit, *concurrent)
 	}
 
 	// Scrape URLs
@@ -69,10 +84,10 @@ func main() {
 	}
 
 	if len(articles) == 0 {
-		log.Fatal("No articles were scraped")
+		log.Fatal("No articles were scraped. Try enabling debug mode (-debug=true) to troubleshoot.")
 	}
 
-	fmt.Printf("Found %d articles\n", len(articles))
+	fmt.Printf("Successfully scraped %d articles using hybrid approach\n", len(articles))
 
 	// Export based on chosen format
 	switch *format {
@@ -92,5 +107,10 @@ func main() {
 
 	default:
 		log.Fatalf("Unsupported export format: %s", *format)
+	}
+
+	fmt.Println("✅ Complete magazine archive extraction finished!")
+	if *debug {
+		fmt.Printf("Note: Articles marked as 'scraped_from' indicate source (RSS=recent, HTML=historical)\n")
 	}
 }
