@@ -2,12 +2,10 @@ package pkg
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,10 +40,10 @@ func DefaultConfig() ScraperConfig {
 		ConcurrentRequests: 3,
 		RequestsPerSecond:  1.0,
 		Timeout:            5 * time.Minute,
-		UserAgent:         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-		UseJavaScript:     false, // Set to true if you have Chrome/Chromium installed
-		MaxPages:          10,    // Reasonable default to prevent infinite scraping
-		Debug:             false,
+		UserAgent:          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		UseJavaScript:      false, // Set to true if you have Chrome/Chromium installed
+		MaxPages:           10,    // Reasonable default to prevent infinite scraping
+		Debug:              false,
 	}
 }
 
@@ -74,7 +72,7 @@ type MagazineScraper struct {
 func NewMagazineScraper(config ScraperConfig) *MagazineScraper {
 	// Create collector with appropriate configuration
 	var c *colly.Collector
-	
+
 	if config.UseJavaScript {
 		// JavaScript-enabled scraping (requires Chrome/Chromium)
 		c = colly.NewCollector(
@@ -164,7 +162,7 @@ func (s *MagazineScraper) scrapeURLWithFallback(ctx context.Context, url string)
 	if s.config.Debug {
 		log.Printf("Trying RSS approach for %s", url)
 	}
-	
+
 	rssArticles, err := s.scrapeRSSFeed(ctx, url)
 	if err != nil {
 		errors = append(errors, fmt.Sprintf("RSS failed: %v", err))
@@ -182,7 +180,7 @@ func (s *MagazineScraper) scrapeURLWithFallback(ctx context.Context, url string)
 	if s.config.Debug {
 		log.Printf("Trying HTML approach for %s", url)
 	}
-	
+
 	htmlArticles, err := s.scrapeHTMLWithPagination(ctx, url)
 	if err != nil {
 		errors = append(errors, fmt.Sprintf("HTML failed: %v", err))
@@ -261,7 +259,7 @@ func (s *MagazineScraper) scrapeHTMLWithPagination(ctx context.Context, baseURL 
 
 		// Construct paginated URL (this is a guess - would need to reverse engineer Flipboard's pagination)
 		pageURL := s.buildPageURL(baseURL, currentPage)
-		
+
 		if s.config.Debug {
 			log.Printf("Scraping page %d: %s", currentPage, pageURL)
 		}
@@ -276,7 +274,7 @@ func (s *MagazineScraper) scrapeHTMLWithPagination(ctx context.Context, baseURL 
 		}
 
 		allArticles = append(allArticles, pageArticles...)
-		
+
 		if s.config.Debug {
 			log.Printf("Page %d yielded %d articles", currentPage, len(pageArticles))
 		}
@@ -300,10 +298,10 @@ func (s *MagazineScraper) buildPageURL(baseURL string, page int) string {
 		return baseURL
 	}
 	return fmt.Sprintf("%s?page=%d", baseURL, page)
-	
+
 	// Option 2: Path-based pagination
 	// return fmt.Sprintf("%s/page/%d", baseURL, page)
-	
+
 	// Option 3: AJAX/JSON API (would require different handling)
 	// return fmt.Sprintf("%s/api/items?offset=%d", baseURL, (page-1)*20)
 }

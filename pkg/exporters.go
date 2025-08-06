@@ -5,7 +5,6 @@ import (
 	"encoding/csv"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -34,11 +33,11 @@ func (e *CSVExporter) Export(articles []Article) error {
 
 	// Write header with new fields
 	if err := writer.Write([]string{
-		"Title", 
-		"URL", 
-		"Summary", 
-		"Date", 
-		"Author", 
+		"Title",
+		"URL",
+		"Summary",
+		"Date",
+		"Author",
 		"ImageURL",
 		"Source",
 		"GUID",
