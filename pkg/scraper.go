@@ -89,7 +89,7 @@ func NewMagazineScraper(config ScraperConfig) *MagazineScraper {
 
 	// Enable debug mode if requested
 	if config.Debug {
-		c.Debugger = &debug.LogDebugger{}
+		c.SetDebugger(&debug.LogDebugger{})
 	}
 
 	// Set up rate limiting
