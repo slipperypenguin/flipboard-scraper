@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/chromedp/chromedp"
 	"github.com/gocolly/colly/v2"
 	"github.com/gocolly/colly/v2/debug"
 	"golang.org/x/sync/errgroup"
@@ -32,6 +34,10 @@ type ScraperConfig struct {
 	MaxPages int
 	// Debug enables verbose logging
 	Debug bool
+	// ScrollDelay is the delay between scroll actions for infinite scroll
+	ScrollDelay time.Duration
+	// MaxScrolls limits the number of scroll attempts for infinite scroll
+	MaxScrolls int
 }
 
 // DefaultConfig returns the default scraper configuration
@@ -41,9 +47,11 @@ func DefaultConfig() ScraperConfig {
 		RequestsPerSecond:  1.0,
 		Timeout:            5 * time.Minute,
 		UserAgent:          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-		UseJavaScript:      false, // Set to true if you have Chrome/Chromium installed
-		MaxPages:           10,    // Reasonable default to prevent infinite scraping
+		UseJavaScript:      true, // Now defaults to true for Flipboard
+		MaxPages:           0,    // No limit by default
 		Debug:              false,
+		ScrollDelay:        2 * time.Second,
+		MaxScrolls:         100, // Reasonable default for infinite scroll
 	}
 }
 
@@ -73,19 +81,9 @@ func NewMagazineScraper(config ScraperConfig) *MagazineScraper {
 	// Create collector with appropriate configuration
 	var c *colly.Collector
 
-	if config.UseJavaScript {
-		// JavaScript-enabled scraping (requires Chrome/Chromium)
-		c = colly.NewCollector(
-			colly.UserAgent(config.UserAgent),
-		)
-		// Note: For full JavaScript support, you'd need to integrate with chromedp or similar
-		// This is a placeholder for the JavaScript-enabled approach
-	} else {
-		// Standard HTTP scraping
-		c = colly.NewCollector(
-			colly.UserAgent(config.UserAgent),
-		)
-	}
+	c = colly.NewCollector(
+		colly.UserAgent(config.UserAgent),
+	)
 
 	// Enable debug mode if requested
 	if config.Debug {
@@ -118,7 +116,7 @@ func (s *MagazineScraper) ScrapeURLs(ctx context.Context, urls []string) ([]Arti
 
 	var allArticles []Article
 	s.mu.Lock()
-	allArticles = make([]Article, 0, len(urls)*50) // Pre-allocate for more articles
+	allArticles = make([]Article, 0, len(urls)*500) // Pre-allocate for more articles
 	s.mu.Unlock()
 
 	// Process each URL concurrently
@@ -130,8 +128,8 @@ func (s *MagazineScraper) ScrapeURLs(ctx context.Context, urls []string) ([]Arti
 				return fmt.Errorf("rate limiter wait failed: %w", err)
 			}
 
-			// Try both RSS and HTML scraping approaches
-			articles, err := s.scrapeURLWithFallback(ctx, url)
+			// Use chromedp for JavaScript-heavy content
+			articles, err := s.scrapeWithChromedp(ctx, url)
 			if err != nil {
 				return fmt.Errorf("failed to scrape %s: %w", url, err)
 			}
@@ -153,253 +151,333 @@ func (s *MagazineScraper) ScrapeURLs(ctx context.Context, urls []string) ([]Arti
 	return allArticles, nil
 }
 
-// scrapeURLWithFallback tries multiple approaches to get maximum historical content
-func (s *MagazineScraper) scrapeURLWithFallback(ctx context.Context, url string) ([]Article, error) {
-	var allArticles []Article
-	var errors []string
+// scrapeWithChromedp uses chromedp to scrape JavaScript-heavy Flipboard content
+func (s *MagazineScraper) scrapeWithChromedp(ctx context.Context, targetURL string) ([]Article, error) {
+	if !strings.HasPrefix(targetURL, "https://flipboard.com/") {
+		return nil, fmt.Errorf("invalid Flipboard URL: %s", targetURL)
+	}
 
-	// Approach 1: Try RSS first (gets recent items quickly)
 	if s.config.Debug {
-		log.Printf("Trying RSS approach for %s", url)
+		log.Printf("Starting chromedp scraping for %s", targetURL)
 	}
 
-	rssArticles, err := s.scrapeRSSFeed(ctx, url)
+	// Create a new context for chromedp
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", true),
+		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("disable-extensions", true),
+		chromedp.Flag("no-sandbox", true),
+		chromedp.UserAgent(s.config.UserAgent),
+	)
+
+	allocCtx, cancel := chromedp.NewExecAllocator(ctx, opts...)
+	defer cancel()
+
+	chromeCtx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+
+	var articles []Article
+	var htmlContent string
+
+	// Run chromedp tasks
+	err := chromedp.Run(chromeCtx,
+		// Navigate to the page
+		chromedp.Navigate(targetURL),
+		
+		// Wait for the page to load initially
+		chromedp.WaitVisible(`body`, chromedp.ByQuery),
+		
+		// Wait a bit for initial content to load
+		chromedp.Sleep(3*time.Second),
+		
+		// Perform infinite scroll to load all content
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return s.performInfiniteScroll(ctx)
+		}),
+		
+		// Extract the final HTML content
+		chromedp.OuterHTML(`html`, &htmlContent),
+	)
+
 	if err != nil {
-		errors = append(errors, fmt.Sprintf("RSS failed: %v", err))
-		if s.config.Debug {
-			log.Printf("RSS scraping failed for %s: %v", url, err)
-		}
-	} else {
-		allArticles = append(allArticles, rssArticles...)
-		if s.config.Debug {
-			log.Printf("RSS scraping found %d articles for %s", len(rssArticles), url)
-		}
+		return nil, fmt.Errorf("chromedp error: %w", err)
 	}
 
-	// Approach 2: Try HTML scraping with pagination (gets historical content)
 	if s.config.Debug {
-		log.Printf("Trying HTML approach for %s", url)
+		log.Printf("Successfully loaded page content (%d chars)", len(htmlContent))
 	}
 
-	htmlArticles, err := s.scrapeHTMLWithPagination(ctx, url)
-	if err != nil {
-		errors = append(errors, fmt.Sprintf("HTML failed: %v", err))
-		if s.config.Debug {
-			log.Printf("HTML scraping failed for %s: %v", url, err)
-		}
-	} else {
-		// Deduplicate articles (HTML might contain articles we already got from RSS)
-		deduped := s.deduplicateArticles(allArticles, htmlArticles)
-		allArticles = append(allArticles, deduped...)
-		if s.config.Debug {
-			log.Printf("HTML scraping found %d new articles for %s", len(deduped), url)
-		}
+	// Parse the HTML content to extract articles
+	articles = s.parseFlipboardHTML(htmlContent)
+
+	if s.config.Debug {
+		log.Printf("Extracted %d articles from %s", len(articles), targetURL)
 	}
 
-	if len(allArticles) == 0 {
-		return nil, fmt.Errorf("all approaches failed: %s", strings.Join(errors, "; "))
-	}
-
-	return allArticles, nil
+	return articles, nil
 }
 
-// scrapeRSSFeed attempts to scrape using RSS (gets recent articles)
-func (s *MagazineScraper) scrapeRSSFeed(ctx context.Context, url string) ([]Article, error) {
-	// Convert to RSS URL
-	rssURL, err := s.convertToRSSURL(url)
-	if err != nil {
-		return nil, err
+// performInfiniteScroll scrolls down the page to load all content
+func (s *MagazineScraper) performInfiniteScroll(ctx context.Context) error {
+	if s.config.Debug {
+		log.Printf("Starting infinite scroll (max scrolls: %d)", s.config.MaxScrolls)
 	}
 
-	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "GET", rssURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
+	scrollCount := 0
+	lastHeight := 0
 
-	req.Header.Set("User-Agent", s.config.UserAgent)
-
-	// Make HTTP request
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch RSS feed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("RSS feed returned status %d", resp.StatusCode)
-	}
-
-	// For now, return empty to focus on HTML approach
-	// TODO: Implement RSS parsing from previous version
-	return []Article{}, nil
-}
-
-// scrapeHTMLWithPagination attempts to scrape HTML with pagination support
-func (s *MagazineScraper) scrapeHTMLWithPagination(ctx context.Context, baseURL string) ([]Article, error) {
-	if !strings.HasPrefix(baseURL, "https://flipboard.com/") {
-		return nil, fmt.Errorf("invalid Flipboard URL: %s", baseURL)
-	}
-
-	var allArticles []Article
-	currentPage := 1
-
-	for currentPage <= s.config.MaxPages {
-		select {
-		case <-ctx.Done():
-			return allArticles, ctx.Err()
-		default:
-		}
-
-		// Wait for rate limiter
-		if err := s.limiter.Wait(ctx); err != nil {
-			return allArticles, err
-		}
-
-		// Construct paginated URL (this is a guess - would need to reverse engineer Flipboard's pagination)
-		pageURL := s.buildPageURL(baseURL, currentPage)
-
-		if s.config.Debug {
-			log.Printf("Scraping page %d: %s", currentPage, pageURL)
-		}
-
-		// Scrape this page
-		pageArticles, hasMore, err := s.scrapePage(ctx, pageURL)
+	for scrollCount < s.config.MaxScrolls {
+		// Get current page height
+		var currentHeight int
+		err := chromedp.Evaluate(`document.body.scrollHeight`, &currentHeight).Do(ctx)
 		if err != nil {
+			return fmt.Errorf("failed to get page height: %w", err)
+		}
+
+		// If height hasn't changed, we've probably reached the end
+		if currentHeight == lastHeight {
 			if s.config.Debug {
-				log.Printf("Failed to scrape page %d: %v", currentPage, err)
+				log.Printf("Page height unchanged (%d), stopping scroll", currentHeight)
 			}
 			break
 		}
 
-		allArticles = append(allArticles, pageArticles...)
-
-		if s.config.Debug {
-			log.Printf("Page %d yielded %d articles", currentPage, len(pageArticles))
+		// Scroll to bottom
+		err = chromedp.Evaluate(`window.scrollTo(0, document.body.scrollHeight)`, nil).Do(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to scroll: %w", err)
 		}
 
-		// If no more pages or no articles found, stop
-		if !hasMore || len(pageArticles) == 0 {
+		// Wait for new content to load
+		time.Sleep(s.config.ScrollDelay)
+
+		lastHeight = currentHeight
+		scrollCount++
+
+		if s.config.Debug && scrollCount%10 == 0 {
+			log.Printf("Completed %d scrolls, page height: %d", scrollCount, currentHeight)
+		}
+	}
+
+	if s.config.Debug {
+		log.Printf("Finished scrolling after %d attempts", scrollCount)
+	}
+
+	return nil
+}
+
+// parseFlipboardHTML parses the HTML content and extracts articles
+func (s *MagazineScraper) parseFlipboardHTML(htmlContent string) []Article {
+	var articles []Article
+	
+	// Create a new colly collector for parsing
+	c := colly.NewCollector()
+	
+	// Look for various article patterns in Flipboard
+	// Flipboard uses different selectors, we'll try multiple patterns
+	selectors := []string{
+		`[data-test-id="story"]`,           // Main story elements
+		`[data-testid="story"]`,            // Alternative test id
+		`.story`,                           // Story class
+		`.story-item`,                      // Story item class
+		`.magazine-story`,                  // Magazine story class
+		`article`,                          // Standard article tags
+		`[role="article"]`,                 // ARIA article role
+		`.flip-story`,                      // Flipboard story class
+		`.story-tile`,                      // Story tile class
+	}
+	
+	for _, selector := range selectors {
+		c.OnHTML(selector, func(e *colly.HTMLElement) {
+			article := s.extractArticleFromElement(e)
+			if article.Title != "" && article.URL != "" {
+				articles = append(articles, article)
+			}
+		})
+	}
+	
+	// Visit the HTML content
+	c.OnHTML("html", func(e *colly.HTMLElement) {
+		// This will trigger the article extraction
+	})
+	
+	// Create a temporary reader for the HTML content
+	c.Visit("data:text/html," + url.QueryEscape(htmlContent))
+	
+	// Deduplicate articles based on URL
+	articles = s.deduplicateArticles(articles)
+	
+	return articles
+}
+
+// extractArticleFromElement extracts article data from a single HTML element
+func (s *MagazineScraper) extractArticleFromElement(e *colly.HTMLElement) Article {
+	article := Article{
+		Date:        time.Now(),
+		ScrapedFrom: "html",
+	}
+	
+	// Extract title from various possible selectors
+	titleSelectors := []string{
+		"h1", "h2", "h3", "h4", 
+		".title", ".headline", ".story-title",
+		"[data-test-id='story-title']", "[data-testid='story-title']",
+		".flip-story-title",
+	}
+	
+	for _, sel := range titleSelectors {
+		if title := cleanText(e.ChildText(sel)); title != "" {
+			article.Title = title
 			break
 		}
-
-		currentPage++
 	}
-
-	return allArticles, nil
-}
-
-// buildPageURL constructs a URL for a specific page (needs reverse engineering)
-func (s *MagazineScraper) buildPageURL(baseURL string, page int) string {
-	// This is speculative - Flipboard might use different pagination mechanisms:
-	// Option 1: Query parameter
-	if page == 1 {
-		return baseURL
+	
+	// Extract URL from various possible selectors
+	urlSelectors := []string{
+		"a[href]", 
+		"[data-test-id='story-link']", "[data-testid='story-link']",
+		".story-link", ".flip-story-link",
 	}
-	return fmt.Sprintf("%s?page=%d", baseURL, page)
-
-	// Option 2: Path-based pagination
-	// return fmt.Sprintf("%s/page/%d", baseURL, page)
-
-	// Option 3: AJAX/JSON API (would require different handling)
-	// return fmt.Sprintf("%s/api/items?offset=%d", baseURL, (page-1)*20)
-}
-
-// scrapePage scrapes a single page and returns articles + whether more pages exist
-func (s *MagazineScraper) scrapePage(ctx context.Context, pageURL string) ([]Article, bool, error) {
-	var articles []Article
-	var hasNextPage bool
-	var scrapeError error
-
-	// Create a new collector instance for this page
-	c := s.collector.Clone()
-
-	// Set up article extraction
-	c.OnHTML("article, .item, .story, .post", func(e *colly.HTMLElement) {
-		article := Article{
-			Title:       cleanText(e.ChildText("h1, h2, h3, h4, .title, .headline")),
-			URL:         e.ChildAttr("a", "href"),
-			Summary:     cleanText(e.ChildText(".description, .summary, .excerpt, p")),
-			Date:        time.Now(), // Default to current time if we can't parse
-			ScrapedFrom: "html",
+	
+	for _, sel := range urlSelectors {
+		if href := e.ChildAttr(sel, "href"); href != "" {
+			article.URL = s.normalizeURL(href)
+			break
 		}
-
-		// Try to extract image
-		if imgSrc := e.ChildAttr("img", "src"); imgSrc != "" {
-			article.ImageURL = imgSrc
+	}
+	
+	// Extract summary/description
+	summarySelectors := []string{
+		".description", ".summary", ".excerpt", 
+		".story-description", ".flip-story-summary",
+		"p", ".text",
+	}
+	
+	for _, sel := range summarySelectors {
+		if summary := cleanText(e.ChildText(sel)); summary != "" && len(summary) > 20 {
+			article.Summary = summary
+			if len(article.Summary) > 500 {
+				article.Summary = article.Summary[:500] + "..."
+			}
+			break
 		}
-
-		// Try to extract source/author
-		if source := cleanText(e.ChildText(".source, .author, .byline")); source != "" {
+	}
+	
+	// Extract image URL
+	imgSelectors := []string{
+		"img[src]", ".story-image img", ".flip-story-image img",
+		"[data-test-id='story-image'] img", "[data-testid='story-image'] img",
+	}
+	
+	for _, sel := range imgSelectors {
+		if imgSrc := e.ChildAttr(sel, "src"); imgSrc != "" {
+			article.ImageURL = s.normalizeURL(imgSrc)
+			break
+		}
+	}
+	
+	// Extract source/author
+	sourceSelectors := []string{
+		".source", ".author", ".byline", ".publication",
+		".story-source", ".flip-story-source",
+		"[data-test-id='story-source']", "[data-testid='story-source']",
+	}
+	
+	for _, sel := range sourceSelectors {
+		if source := cleanText(e.ChildText(sel)); source != "" {
 			article.Source = source
+			break
 		}
-
-		// Only add articles with at least a title
-		if article.Title != "" {
-			articles = append(articles, article)
+	}
+	
+	// Try to extract date if available
+	dateSelectors := []string{
+		"time[datetime]", ".date", ".timestamp", 
+		".story-date", ".flip-story-date",
+		"[data-test-id='story-date']", "[data-testid='story-date']",
+	}
+	
+	for _, sel := range dateSelectors {
+		if dateStr := e.ChildAttr(sel, "datetime"); dateStr != "" {
+			if parsedDate, err := time.Parse(time.RFC3339, dateStr); err == nil {
+				article.Date = parsedDate
+				break
+			}
 		}
-	})
-
-	// Check for pagination indicators
-	c.OnHTML(".next, .pagination, .load-more", func(e *colly.HTMLElement) {
-		hasNextPage = true
-	})
-
-	// Handle errors
-	c.OnError(func(r *colly.Response, err error) {
-		scrapeError = fmt.Errorf("request failed with status %d: %w", r.StatusCode, err)
-	})
-
-	// Visit the page
-	err := c.Visit(pageURL)
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to visit page: %w", err)
+		if dateText := cleanText(e.ChildText(sel)); dateText != "" {
+			// Try various date formats
+			formats := []string{
+				"2006-01-02T15:04:05Z07:00",
+				"2006-01-02 15:04:05",
+				"January 2, 2006",
+				"Jan 2, 2006",
+				"2006-01-02",
+			}
+			for _, format := range formats {
+				if parsedDate, err := time.Parse(format, dateText); err == nil {
+					article.Date = parsedDate
+					break
+				}
+			}
+		}
 	}
-
-	// Wait for completion
-	c.Wait()
-
-	if scrapeError != nil {
-		return nil, false, scrapeError
-	}
-
-	return articles, hasNextPage, nil
+	
+	return article
 }
 
-// convertToRSSURL converts a Flipboard magazine URL to its RSS feed URL
-func (s *MagazineScraper) convertToRSSURL(url string) (string, error) {
-	if !strings.HasPrefix(url, "https://flipboard.com/") {
-		return "", fmt.Errorf("invalid Flipboard URL: %s", url)
+// normalizeURL converts relative URLs to absolute URLs
+func (s *MagazineScraper) normalizeURL(rawURL string) string {
+	if rawURL == "" {
+		return ""
 	}
-
-	if strings.HasSuffix(url, ".rss") {
-		return url, nil
+	
+	// If it's already absolute, return as-is
+	if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
+		return rawURL
 	}
-
-	return url + ".rss", nil
+	
+	// If it starts with //, prepend https:
+	if strings.HasPrefix(rawURL, "//") {
+		return "https:" + rawURL
+	}
+	
+	// If it starts with /, it's relative to flipboard.com
+	if strings.HasPrefix(rawURL, "/") {
+		return "https://flipboard.com" + rawURL
+	}
+	
+	// Otherwise, assume it's a path relative to flipboard.com
+	return "https://flipboard.com/" + rawURL
 }
 
-// deduplicateArticles removes duplicate articles between two slices
-func (s *MagazineScraper) deduplicateArticles(existing, new []Article) []Article {
-	existingURLs := make(map[string]bool)
-	for _, article := range existing {
-		if article.URL != "" {
-			existingURLs[article.URL] = true
-		}
-	}
-
+// deduplicateArticles removes duplicate articles based on URL
+func (s *MagazineScraper) deduplicateArticles(articles []Article) []Article {
+	seen := make(map[string]bool)
 	var deduplicated []Article
-	for _, article := range new {
-		if article.URL == "" || !existingURLs[article.URL] {
-			deduplicated = append(deduplicated, article)
+	
+	for _, article := range articles {
+		// Skip articles without URLs or titles
+		if article.URL == "" || article.Title == "" {
+			continue
 		}
+		
+		// Skip if we've already seen this URL
+		if seen[article.URL] {
+			continue
+		}
+		
+		seen[article.URL] = true
+		deduplicated = append(deduplicated, article)
 	}
-
+	
 	return deduplicated
 }
 
 // cleanText removes extra whitespace and normalizes text
 func cleanText(text string) string {
-	return strings.TrimSpace(strings.Join(strings.Fields(text), " "))
+	// Remove extra whitespace and normalize
+	text = strings.TrimSpace(text)
+	text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")
+	return text
 }
