@@ -48,21 +48,21 @@ func CleanURL(rawURL string) string {
 
 	// List of tracking parameters to remove
 	trackingParams := map[string]bool{
-		"utm_source":    true,
-		"utm_medium":    true,
-		"utm_campaign":  true,
-		"utm_content":   true,
-		"utm_term":      true,
-		"fbclid":        true,
-		"gclid":         true,
-		"ref":           true,
-		"referrer":      true,
-		"source":        true,
-		"campaign":      true,
-		"mc_cid":        true,
-		"mc_eid":        true,
-		"_ga":           true,
-		"_gid":          true,
+		"utm_source":   true,
+		"utm_medium":   true,
+		"utm_campaign": true,
+		"utm_content":  true,
+		"utm_term":     true,
+		"fbclid":       true,
+		"gclid":        true,
+		"ref":          true,
+		"referrer":     true,
+		"source":       true,
+		"campaign":     true,
+		"mc_cid":       true,
+		"mc_eid":       true,
+		"_ga":          true,
+		"_gid":         true,
 	}
 
 	// Clean query parameters
