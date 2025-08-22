@@ -18,31 +18,40 @@ func main() {
 		urls           = flag.String("urls", "", "Comma-separated list of Flipboard magazine URLs to scrape")
 		format         = flag.String("format", "csv", "Export format (csv or sqlite)")
 		output         = flag.String("output", "articles", "Output file (without extension)")
-		concurrent     = flag.Int("concurrent", 2, "Maximum number of concurrent requests (recommended: 1-2 for chromedp)")
+		concurrent     = flag.Int("concurrent", 1, "Maximum number of concurrent requests (recommended: 1-2 for chromedp)")
 		rateLimit      = flag.Float64("rate-limit", 0.5, "Maximum requests per second (lower for chromedp)")
 		timeoutSeconds = flag.Int("timeout", 900, "Timeout in seconds (increased for chromedp)")
 		userAgent      = flag.String("user-agent", "", "User-Agent string for requests (uses default if empty)")
-		maxScrolls     = flag.Int("max-scrolls", 200, "Maximum scrolls for infinite scroll (0 = unlimited)")
-		scrollDelay    = flag.Int("scroll-delay", 2, "Delay between scrolls in seconds")
+		maxScrolls     = flag.Int("max-scrolls", 150, "Maximum scrolls for infinite scroll (0 = disabled)")
+		scrollDelay    = flag.Int("scroll-delay", 3, "Delay between scrolls in seconds")
 		debug          = flag.Bool("debug", false, "Enable debug logging")
-		useJS          = flag.Bool("javascript", true, "Enable JavaScript rendering (required for Flipboard)")
+		headless       = flag.Bool("headless", true, "Run browser in headless mode")
+		manualLogin    = flag.Bool("manual-login", false, "Allow manual login (sets headless=false)")
+		quickSample    = flag.Bool("quick-sample", false, "Quick sample mode: scrape first page only")
 	)
 
 	flag.Parse()
+
+	fmt.Println("🔓 Flipboard Magazine Scraper - Enhanced with URL Decoding")
+	fmt.Println()
 
 	if *urls == "" {
 		log.Fatal("Please provide Flipboard magazine URLs using the -urls flag")
 	}
 
-	// Validate that JavaScript is enabled for Flipboard
-	if !*useJS {
-		fmt.Println("⚠️  Warning: JavaScript rendering is disabled, but Flipboard requires it.")
-		fmt.Println("   Enabling JavaScript automatically for best results.")
-		*useJS = true
+	// Manual login forces non-headless mode
+	if *manualLogin {
+		*headless = false
+	}
+
+	// Quick sample mode limits scrolling
+	if *quickSample {
+		*maxScrolls = 0
+		fmt.Println("🚀 Quick sample mode: scraping first page only")
 	}
 
 	// Create context that can be cancelled
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutSeconds)*time.Second)
 	defer cancel()
 
 	// Handle interrupt signal
@@ -54,15 +63,17 @@ func main() {
 		cancel()
 	}()
 
-	// Configure and create scraper
+	// Configure scraper with enhanced settings
 	config := pkg.ScraperConfig{
 		ConcurrentRequests: *concurrent,
 		RequestsPerSecond:  *rateLimit,
-		Timeout:           time.Duration(*timeoutSeconds) * time.Second,
-		MaxScrolls:        *maxScrolls,
-		ScrollDelay:       time.Duration(*scrollDelay) * time.Second,
-		Debug:             *debug,
-		UseJavaScript:     *useJS,
+		Timeout:            time.Duration(*timeoutSeconds) * time.Second,
+		MaxScrolls:         *maxScrolls,
+		ScrollDelay:        time.Duration(*scrollDelay) * time.Second,
+		Debug:              *debug,
+		UseJavaScript:      true, // Always required for Flipboard
+		Headless:           *headless,
+		ManualLogin:        *manualLogin,
 	}
 
 	// Set user agent (use default if not specified)
@@ -80,24 +91,37 @@ func main() {
 		urlList[i] = strings.TrimSpace(url)
 	}
 
-	fmt.Printf("🚀 Starting chromedp-powered scraping of %d Flipboard magazine(s)...\n", len(urlList))
-	if *debug {
-		fmt.Printf("📊 Configuration: max-scrolls=%d, scroll-delay=%ds, rate-limit=%.1f/sec, concurrent=%d\n", 
-			*maxScrolls, *scrollDelay, *rateLimit, *concurrent)
-	}
-	
-	fmt.Println("📱 Using headless Chrome to handle JavaScript content...")
+	// Display configuration
+	fmt.Printf("🚀 Starting enhanced scraping of %d Flipboard magazine(s)...\n", len(urlList))
+	fmt.Printf("📱 Using Chrome browser (headless: %v) to handle JavaScript content...\n", *headless)
 
-	// Display expected time estimate
-	estimatedMinutes := len(urlList) * 2 // Rough estimate: 2 minutes per magazine
-	if estimatedMinutes > 1 {
-		fmt.Printf("⏱️  Estimated time: %d-%d minutes (depends on magazine size)\n", 
-			estimatedMinutes, estimatedMinutes*2)
+	if *debug {
+		fmt.Printf("📊 Configuration:\n")
+		fmt.Printf("   • Max scrolls: %d\n", *maxScrolls)
+		fmt.Printf("   • Scroll delay: %ds\n", *scrollDelay)
+		fmt.Printf("   • Rate limit: %.1f/sec\n", *rateLimit)
+		fmt.Printf("   • Concurrent: %d\n", *concurrent)
+		fmt.Printf("   • Timeout: %ds\n", *timeoutSeconds)
 	}
+
+	// Estimate time (very rough)
+	if !*quickSample {
+		estimatedMinutes := len(urlList) * 3 // Rough estimate: 3 minutes per magazine with scrolling
+		if estimatedMinutes > 2 {
+			fmt.Printf("⏱️  Estimated time: %d-%d minutes (depends on magazine size and scroll settings)\n",
+				estimatedMinutes, estimatedMinutes*2)
+		}
+	}
+
+	if *manualLogin {
+		fmt.Println("🔐 Manual login mode enabled - browser will open for you to login")
+	}
+
+	fmt.Println()
 
 	startTime := time.Now()
 
-	// Scrape URLs
+	// Scrape URLs with enhanced method
 	articles, err := scraper.ScrapeURLs(ctx, urlList)
 	if err != nil {
 		log.Printf("⚠️  Warning: Some URLs may have failed: %v", err)
@@ -106,33 +130,43 @@ func main() {
 	elapsed := time.Since(startTime)
 
 	if len(articles) == 0 {
-		log.Fatal("❌ No articles were scraped. Try enabling debug mode (-debug=true) to troubleshoot.")
+		log.Fatal("❌ No articles were scraped. Try enabling debug mode (-debug=true) or manual login (-manual-login=true) to troubleshoot.")
 	}
 
 	fmt.Printf("✅ Successfully scraped %d articles in %v\n", len(articles), elapsed.Round(time.Second))
 
-	// Show some statistics
-	if len(articles) > 0 {
-		fmt.Printf("📈 Statistics:\n")
-		fmt.Printf("   • Total articles: %d\n", len(articles))
-		fmt.Printf("   • Articles per minute: %.1f\n", float64(len(articles))/elapsed.Minutes())
-		
-		// Count articles with different attributes
-		withImages := 0
-		withSummaries := 0
-		for _, article := range articles {
-			if article.ImageURL != "" {
-				withImages++
+	// Generate and display statistics
+	stats := pkg.GenerateStats(articles)
+	pkg.PrintStats(stats)
+
+	// Show sample of decoded URLs
+	fmt.Println("\n🔗 Sample of decoded URLs:")
+	sampleCount := 5
+	if len(articles) < sampleCount {
+		sampleCount = len(articles)
+	}
+
+	for i := 0; i < sampleCount; i++ {
+		article := articles[i]
+		fmt.Printf("%d. %s\n", i+1, article.Title)
+		if article.ActualURL != "" {
+			fmt.Printf("   Decoded URL: %s\n", article.ActualURL)
+			if article.Source != "" {
+				fmt.Printf("   Source: %s\n", article.Source)
 			}
-			if article.Summary != "" {
-				withSummaries++
-			}
+		} else {
+			fmt.Printf("   Flipboard URL: %s\n", article.URL)
 		}
-		fmt.Printf("   • Articles with images: %d (%.1f%%)\n", withImages, float64(withImages)*100/float64(len(articles)))
-		fmt.Printf("   • Articles with summaries: %d (%.1f%%)\n", withSummaries, float64(withSummaries)*100/float64(len(articles)))
+		fmt.Println()
+	}
+
+	if len(articles) > sampleCount {
+		fmt.Printf("... and %d more\n\n", len(articles)-sampleCount)
 	}
 
 	// Export based on chosen format
+	fmt.Printf("💾 Exporting to %s format...\n", *format)
+
 	switch *format {
 	case "csv":
 		exporter := pkg.NewCSVExporter(*output + ".csv")
@@ -141,6 +175,12 @@ func main() {
 		}
 		fmt.Printf("💾 Articles exported to %s.csv\n", *output)
 
+		// Show CSV preview
+		fmt.Println("\n📋 CSV columns include:")
+		fmt.Println("   • Title, URL (final), Original_URL, Actual_URL (decoded)")
+		fmt.Println("   • Summary, Date, Author, ImageURL, Source")
+		fmt.Println("   • GUID, ScrapedFrom")
+
 	case "sqlite":
 		exporter := pkg.NewSQLiteExporter(*output + ".db")
 		if err := exporter.Export(articles); err != nil {
@@ -148,18 +188,48 @@ func main() {
 		}
 		fmt.Printf("💾 Articles exported to %s.db\n", *output)
 
+		// Show SQLite info
+		fmt.Println("\n🗄️  SQLite database includes:")
+		fmt.Println("   • Enhanced schema with URL decoding support")
+		fmt.Println("   • Indexes on url, actual_url, source, date for fast queries")
+		fmt.Println("   • Duplicate prevention based on actual_url + title")
+
 	default:
 		log.Fatalf("❌ Unsupported export format: %s", *format)
 	}
 
-	fmt.Println("🎉 Complete magazine archive extraction finished!")
-	
-	if *debug {
-		fmt.Printf("🔍 Debug info: All articles were scraped using chromedp with JavaScript rendering\n")
+	fmt.Println("\n🎉 Enhanced magazine extraction with URL decoding complete!")
+
+	// Provide quality assessment
+	decodedPercentage := float64(stats.ExternalURLs) * 100 / float64(stats.TotalArticles)
+	if decodedPercentage > 80 {
+		fmt.Printf("🎯 EXCELLENT! Successfully decoded %.1f%% of article URLs\n", decodedPercentage)
+	} else if decodedPercentage > 50 {
+		fmt.Printf("✅ Good! Successfully decoded %.1f%% of article URLs\n", decodedPercentage)
+	} else if decodedPercentage > 20 {
+		fmt.Printf("📊 Moderate success: decoded %.1f%% of article URLs\n", decodedPercentage)
+	} else {
+		fmt.Printf("⚠️  Low decode rate: only %.1f%% of URLs were decoded. Consider manual login or adjusting settings.\n", decodedPercentage)
 	}
-	
+
 	// Provide usage tips
-	if len(articles) < 50 {
-		fmt.Println("💡 Tip: If you expected more articles, try increasing -max-scrolls or -scroll-delay")
+	fmt.Println()
+	if *quickSample {
+		fmt.Println("💡 This was a quick sample. For complete archives, remove -quick-sample and increase -max-scrolls")
+	} else if stats.ExternalURLs < 50 {
+		fmt.Println("💡 Tips for better results:")
+		fmt.Println("   • Try manual login mode: -manual-login=true")
+		fmt.Println("   • Increase scroll attempts: -max-scrolls=200")
+		fmt.Println("   • Add scroll delay: -scroll-delay=5")
+	}
+
+	if stats.TotalArticles > 500 {
+		fmt.Println("🏆 Great job! You've extracted a comprehensive magazine archive!")
+	}
+
+	if *debug {
+		fmt.Printf("\n🔍 Debug: All %d articles were scraped using chromedp with JavaScript rendering\n", len(articles))
+		fmt.Printf("   • External URLs decoded: %d\n", stats.ExternalURLs)
+		fmt.Printf("   • Flipboard URLs remaining: %d\n", stats.FlipboardURLs)
 	}
 }
