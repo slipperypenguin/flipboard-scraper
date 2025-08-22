@@ -16,8 +16,8 @@ import (
 func main() {
 	var (
 		urls           = flag.String("urls", "", "Comma-separated list of Flipboard magazine URLs to scrape")
-		format         = flag.String("format", "csv", "Export format (csv or sqlite)")
-		output         = flag.String("output", "articles", "Output filename (without extension)")
+		exportFormat   = flag.String("format", "csv", "Export format (csv or sqlite)")
+		exportFilename = flag.String("filename", "articles", "Output filename (without extension)")
 		concurrent     = flag.Int("concurrent", 1, "Maximum number of concurrent requests (recommended: 1-2 for chromedp)")
 		rateLimit      = flag.Float64("rate-limit", 0.5, "Maximum requests per second (lower for chromedp)")
 		timeoutSeconds = flag.Int("timeout", 900, "Timeout in seconds (increased for chromedp)")
@@ -149,22 +149,22 @@ func main() {
 	}
 
 	// Export based on chosen format
-	fmt.Printf("💾 Exporting to %s format...\n", *format)
+	fmt.Printf("💾 Exporting to %s format...\n", *exportFormat)
 
-	switch *format {
+	switch *exportFormat {
 	case "csv":
-		exporter := pkg.NewCSVExporter(*output + ".csv")
+		exporter := pkg.NewCSVExporter(*exportFilename + ".csv")
 		if err := exporter.Export(articles); err != nil {
 			log.Fatalf("❌ Failed to export to CSV: %v", err)
 		}
-		fmt.Printf("✔️ Articles exported to %s.csv\n", *output)
+		fmt.Printf("✔️ Articles exported to %s.csv\n", *exportFilename)
 
 	case "sqlite":
-		exporter := pkg.NewSQLiteExporter(*output + ".db")
+		exporter := pkg.NewSQLiteExporter(*exportFilename + ".db")
 		if err := exporter.Export(articles); err != nil {
 			log.Fatalf("❌ Failed to export to SQLite: %v", err)
 		}
-		fmt.Printf("✔️ Articles exported to %s.db\n", *output)
+		fmt.Printf("✔️ Articles exported to %s.db\n", *exportFilename)
 
 		// Some SQLite info
 		fmt.Println("\n🗄️  SQLite database includes:")
@@ -173,7 +173,7 @@ func main() {
 		fmt.Println("   • Duplicate prevention based on actual_url + title")
 
 	default:
-		log.Fatalf("❌ Unsupported export format: %s", *format)
+		log.Fatalf("❌ Unsupported export format: %s", *exportFormat)
 	}
 
 	fmt.Println("\n🏁 Magazine extraction with URL decoding complete!")
