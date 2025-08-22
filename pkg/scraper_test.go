@@ -144,14 +144,14 @@ func TestExtractSourceFromURL(t *testing.T) {
 	}
 }
 
-func TestEnhancedScraperConfig(t *testing.T) {
+func TestScraperConfig(t *testing.T) {
 	tests := []struct {
 		name   string
 		config ScraperConfig
 		valid  bool
 	}{
 		{
-			name: "Valid enhanced config",
+			name: "Valid scraper config",
 			config: ScraperConfig{
 				ConcurrentRequests: 2,
 				RequestsPerSecond:  0.5,
@@ -185,7 +185,7 @@ func TestEnhancedScraperConfig(t *testing.T) {
 				t.Error("Expected valid scraper for valid config")
 			}
 			if scraper != nil {
-				// Test that enhanced config fields are properly set
+				// Test that scraper config fields are properly set
 				if scraper.config.MaxScrolls != tt.config.MaxScrolls {
 					t.Errorf("MaxScrolls not set correctly: expected %d, got %d",
 						tt.config.MaxScrolls, scraper.config.MaxScrolls)
@@ -200,7 +200,6 @@ func TestEnhancedScraperConfig(t *testing.T) {
 }
 
 func TestArticleStructure(t *testing.T) {
-	// Test the enhanced Article structure
 	article := Article{
 		Title:       "Test Article",
 		URL:         "https://flipboard.com/redirect?url=https%3A//example.com/article",

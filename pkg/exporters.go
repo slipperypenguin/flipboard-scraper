@@ -91,7 +91,7 @@ func NewSQLiteExporter(dbPath string) *SQLiteExporter {
 	return &SQLiteExporter{dbPath: dbPath}
 }
 
-// Export writes articles to a SQLite database with enhanced schema
+// Export writes articles to a SQLite database with consistent schema
 func (e *SQLiteExporter) Export(articles []Article) error {
 	db, err := sql.Open("sqlite3", e.dbPath)
 	if err != nil {
@@ -104,7 +104,7 @@ func (e *SQLiteExporter) Export(articles []Article) error {
 		}
 	}(db)
 
-	// Create table with enhanced schema for URL decoding
+	// Create table with given schema for URL decoding
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS articles (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

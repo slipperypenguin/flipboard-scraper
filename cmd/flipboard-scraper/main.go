@@ -56,7 +56,7 @@ func main() {
 		cancel()
 	}()
 
-	// Configure scraper with enhanced settings
+	// Configure scraper settings
 	config := pkg.ScraperConfig{
 		ConcurrentRequests: *concurrent,
 		RequestsPerSecond:  *rateLimit,
@@ -106,7 +106,7 @@ func main() {
 	fmt.Println()
 	startTime := time.Now()
 
-	// Scrape URLs with enhanced method
+	// Extract articles from given magazine urls
 	articles, err := scraper.ScrapeURLs(ctx, urlList)
 	if err != nil {
 		log.Printf("⚠️  Warning: Some URLs may have failed: %v", err)
