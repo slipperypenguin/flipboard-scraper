@@ -32,7 +32,12 @@ func (e *CSVExporter) Export(articles []Article) error {
 	if err != nil {
 		return fmt.Errorf("failed to create CSV file: %w", err)
 	}
-	defer file.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			panic(err)
+		}
+	}(file)
 
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
@@ -40,15 +45,12 @@ func (e *CSVExporter) Export(articles []Article) error {
 	// Write header with new URL decoding fields
 	if err := writer.Write([]string{
 		"Title",
-		"URL",           // Final URL (ActualURL if available, otherwise original URL)
-		"Original_URL",  // Original Flipboard URL
-		"Actual_URL",    // Decoded external URL
+		"URL",          // Final URL (ActualURL if available, otherwise original URL)
+		"Original_URL", // Original Flipboard URL
+		"Actual_URL",   // Decoded external URL
 		"Summary",
 		"Date",
-		"Author",
-		"ImageURL",
 		"Source",
-		"GUID",
 		"ScrapedFrom",
 	}); err != nil {
 		return fmt.Errorf("failed to write CSV header: %w", err)
@@ -69,10 +71,7 @@ func (e *CSVExporter) Export(articles []Article) error {
 			article.ActualURL,
 			article.Summary,
 			article.Date.Format(time.RFC3339),
-			article.Author,
-			article.ImageURL,
 			article.Source,
-			article.GUID,
 			article.ScrapedFrom,
 		}); err != nil {
 			return fmt.Errorf("failed to write CSV record: %w", err)
@@ -98,7 +97,12 @@ func (e *SQLiteExporter) Export(articles []Article) error {
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
-	defer db.Close()
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+			panic(err)
+		}
+	}(db)
 
 	// Create table with enhanced schema for URL decoding
 	_, err = db.Exec(`
@@ -110,10 +114,7 @@ func (e *SQLiteExporter) Export(articles []Article) error {
 			actual_url TEXT,         -- Decoded external URL
 			summary TEXT,
 			date DATETIME,
-			author TEXT,
-			image_url TEXT,
 			source TEXT,
-			guid TEXT,
 			scraped_from TEXT,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE(actual_url, title) ON CONFLICT IGNORE
@@ -142,13 +143,18 @@ func (e *SQLiteExporter) Export(articles []Article) error {
 	stmt, err := db.Prepare(`
 		INSERT INTO articles (
 			title, url, original_url, actual_url, summary, date,
-			author, image_url, source, guid, scraped_from
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			source, scraped_from
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func(stmt *sql.Stmt) {
+		err := stmt.Close()
+		if err != nil {
+			panic(err)
+		}
+	}(stmt)
 
 	// Insert articles
 	for _, article := range articles {
@@ -165,10 +171,7 @@ func (e *SQLiteExporter) Export(articles []Article) error {
 			article.ActualURL,
 			article.Summary,
 			article.Date,
-			article.Author,
-			article.ImageURL,
 			article.Source,
-			article.GUID,
 			article.ScrapedFrom,
 		)
 		if err != nil {
@@ -181,13 +184,11 @@ func (e *SQLiteExporter) Export(articles []Article) error {
 
 // ExportStats provides statistics about the exported articles
 type ExportStats struct {
-	TotalArticles    int
-	ExternalURLs     int
-	FlipboardURLs    int
-	WithSummaries    int
-	WithImages       int
-	SourceBreakdown  map[string]int
-	ScrapedFrom      map[string]int
+	TotalArticles   int
+	ExternalURLs    int
+	WithSummaries   int
+	SourceBreakdown map[string]int
+	ScrapedFrom     map[string]int
 }
 
 // GenerateStats generates export statistics for the given articles
@@ -202,16 +203,11 @@ func GenerateStats(articles []Article) ExportStats {
 		// Count external vs Flipboard URLs
 		if article.ActualURL != "" && !strings.Contains(article.ActualURL, "flipboard.com") {
 			stats.ExternalURLs++
-		} else {
-			stats.FlipboardURLs++
 		}
 
-		// Count articles with summaries and images
+		// Count articles with summaries
 		if article.Summary != "" {
 			stats.WithSummaries++
-		}
-		if article.ImageURL != "" {
-			stats.WithImages++
 		}
 
 		// Track source breakdown
@@ -233,15 +229,9 @@ func PrintStats(stats ExportStats) {
 	fmt.Printf("   • Articles with external URLs: %d (%.1f%%)\n",
 		stats.ExternalURLs,
 		float64(stats.ExternalURLs)*100/float64(stats.TotalArticles))
-	fmt.Printf("   • Articles with Flipboard URLs: %d (%.1f%%)\n",
-		stats.FlipboardURLs,
-		float64(stats.FlipboardURLs)*100/float64(stats.TotalArticles))
 	fmt.Printf("   • Articles with summaries: %d (%.1f%%)\n",
 		stats.WithSummaries,
 		float64(stats.WithSummaries)*100/float64(stats.TotalArticles))
-	fmt.Printf("   • Articles with images: %d (%.1f%%)\n",
-		stats.WithImages,
-		float64(stats.WithImages)*100/float64(stats.TotalArticles))
 
 	if len(stats.SourceBreakdown) > 0 {
 		fmt.Printf("   • Top sources:\n")

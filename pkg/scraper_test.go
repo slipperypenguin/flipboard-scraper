@@ -160,23 +160,6 @@ func TestEnhancedScraperConfig(t *testing.T) {
 				UseJavaScript:      true,
 				MaxScrolls:         150,
 				ScrollDelay:        3 * time.Second,
-				Headless:           true,
-				ManualLogin:        false,
-			},
-			valid: true,
-		},
-		{
-			name: "Manual login config",
-			config: ScraperConfig{
-				ConcurrentRequests: 1,
-				RequestsPerSecond:  0.3,
-				Timeout:            20 * time.Minute,
-				UserAgent:          "test",
-				UseJavaScript:      true,
-				MaxScrolls:         200,
-				ScrollDelay:        5 * time.Second,
-				Headless:           false,
-				ManualLogin:        true,
 			},
 			valid: true,
 		},
@@ -190,8 +173,6 @@ func TestEnhancedScraperConfig(t *testing.T) {
 				UseJavaScript:      true,
 				MaxScrolls:         0, // No scrolling
 				ScrollDelay:        2 * time.Second,
-				Headless:           true,
-				ManualLogin:        false,
 			},
 			valid: true,
 		},
@@ -213,14 +194,6 @@ func TestEnhancedScraperConfig(t *testing.T) {
 					t.Errorf("ScrollDelay not set correctly: expected %v, got %v",
 						tt.config.ScrollDelay, scraper.config.ScrollDelay)
 				}
-				if scraper.config.Headless != tt.config.Headless {
-					t.Errorf("Headless not set correctly: expected %v, got %v",
-						tt.config.Headless, scraper.config.Headless)
-				}
-				if scraper.config.ManualLogin != tt.config.ManualLogin {
-					t.Errorf("ManualLogin not set correctly: expected %v, got %v",
-						tt.config.ManualLogin, scraper.config.ManualLogin)
-				}
 			}
 		})
 	}
@@ -234,10 +207,7 @@ func TestArticleStructure(t *testing.T) {
 		ActualURL:   "https://example.com/article",
 		Summary:     "This is a test article",
 		Date:        time.Now(),
-		Author:      "Test Author",
-		ImageURL:    "https://example.com/image.jpg",
 		Source:      "example.com",
-		GUID:        "test-guid",
 		ScrapedFrom: "html",
 	}
 
@@ -271,7 +241,6 @@ func TestGenerateStats(t *testing.T) {
 			URL:         "https://flipboard.com/story2",
 			ActualURL:   "https://blog.com/article2",
 			Summary:     "Summary 2",
-			ImageURL:    "https://blog.com/image.jpg",
 			Source:      "blog.com",
 			ScrapedFrom: "html",
 		},
@@ -294,14 +263,8 @@ func TestGenerateStats(t *testing.T) {
 	if stats.ExternalURLs != 2 {
 		t.Errorf("Expected 2 external URLs, got %d", stats.ExternalURLs)
 	}
-	if stats.FlipboardURLs != 1 {
-		t.Errorf("Expected 1 Flipboard URL, got %d", stats.FlipboardURLs)
-	}
 	if stats.WithSummaries != 2 {
 		t.Errorf("Expected 2 articles with summaries, got %d", stats.WithSummaries)
-	}
-	if stats.WithImages != 1 {
-		t.Errorf("Expected 1 article with images, got %d", stats.WithImages)
 	}
 
 	// Test source breakdown

@@ -35,10 +35,6 @@ type ScraperConfig struct {
 	ScrollDelay time.Duration
 	// MaxScrolls limits the number of scroll attempts for infinite scroll
 	MaxScrolls int
-	// Headless controls whether Chrome runs in headless mode
-	Headless bool
-	// ManualLogin allows manual login before scraping
-	ManualLogin bool
 }
 
 // DefaultConfig returns the default scraper configuration
@@ -53,30 +49,25 @@ func DefaultConfig() ScraperConfig {
 		Debug:              false,
 		ScrollDelay:        3 * time.Second,
 		MaxScrolls:         150,
-		Headless:           true,
-		ManualLogin:        false,
 	}
 }
 
 // Article represents a single Flipboard article with decoded URL support
 type Article struct {
 	Title       string    `json:"title"`
-	URL         string    `json:"url"`          // Original Flipboard URL
-	ActualURL   string    `json:"actual_url"`   // Decoded real URL
+	URL         string    `json:"url"`        // Original Flipboard URL
+	ActualURL   string    `json:"actual_url"` // Decoded real URL
 	Summary     string    `json:"summary"`
 	Date        time.Time `json:"date"`
-	Author      string    `json:"author,omitempty"`
-	ImageURL    string    `json:"image_url,omitempty"`
 	Source      string    `json:"source,omitempty"`
-	GUID        string    `json:"guid,omitempty"`
 	ScrapedFrom string    `json:"scraped_from"` // "rss" or "html"
 }
 
 // MagazineScraper handles scraping of Flipboard magazines
 type MagazineScraper struct {
-	config     ScraperConfig
+	config      ScraperConfig
 	rateLimiter *rate.Limiter
-	mutex      sync.RWMutex
+	mutex       sync.RWMutex
 }
 
 // NewMagazineScraper creates a new magazine scraper with the given configuration
@@ -96,8 +87,8 @@ func (s *MagazineScraper) ScrapeURLs(ctx context.Context, urls []string) ([]Arti
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(s.config.ConcurrentRequests)
 
-	for _, url := range urls {
-		url := url // Capture loop variable
+	for _, magazineUrl := range urls {
+		u := magazineUrl // Capture loop variable
 		g.Go(func() error {
 			// Wait for rate limiter
 			if err := s.rateLimiter.Wait(ctx); err != nil {
@@ -105,12 +96,12 @@ func (s *MagazineScraper) ScrapeURLs(ctx context.Context, urls []string) ([]Arti
 			}
 
 			if s.config.Debug {
-				log.Printf("Starting to scrape: %s", url)
+				log.Printf("Starting to scrape: %s", u)
 			}
 
-			articles, err := s.scrapeMagazine(ctx, url)
+			articles, err := s.scrapeMagazine(ctx, u)
 			if err != nil {
-				log.Printf("⚠️  Failed to scrape %s: %v", url, err)
+				log.Printf("⚠️  Failed to scrape %s: %v", u, err)
 				return nil // Don't fail the entire operation
 			}
 
@@ -119,7 +110,7 @@ func (s *MagazineScraper) ScrapeURLs(ctx context.Context, urls []string) ([]Arti
 			mu.Unlock()
 
 			if s.config.Debug {
-				log.Printf("Scraped %d articles from %s", len(articles), url)
+				log.Printf("Scraped %d articles from %s", len(articles), u)
 			}
 
 			return nil
@@ -134,7 +125,7 @@ func (s *MagazineScraper) ScrapeURLs(ctx context.Context, urls []string) ([]Arti
 	return s.deduplicateArticles(allArticles), nil
 }
 
-// scrapeMagazine scrapes a single Flipboard magazine using the enhanced method
+// scrapeMagazine scrapes a single Flipboard magazine
 func (s *MagazineScraper) scrapeMagazine(ctx context.Context, magazineURL string) ([]Article, error) {
 	if !s.isValidFlipboardURL(magazineURL) {
 		return nil, fmt.Errorf("invalid Flipboard URL: %s", magazineURL)
@@ -142,7 +133,7 @@ func (s *MagazineScraper) scrapeMagazine(ctx context.Context, magazineURL string
 
 	// Set up Chrome options
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", s.config.Headless),
+		chromedp.Flag("headless", false),
 		chromedp.Flag("disable-gpu", false),
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-extensions", true),
@@ -172,10 +163,11 @@ func (s *MagazineScraper) scrapeMagazine(ctx context.Context, magazineURL string
 		return nil, fmt.Errorf("failed to wait for page load: %w", err)
 	}
 
-	// Handle manual login if configured
-	if s.config.ManualLogin && !s.config.Headless {
-		fmt.Print("Please login manually if needed, then press Enter to continue: ")
-		fmt.Scanln()
+	// Handle manual login
+	fmt.Print("Please login to Flipboard manually, then press Enter to continue: ")
+	_, err = fmt.Scanln()
+	if err != nil {
+		return nil, err
 	}
 
 	// Perform infinite scroll if configured
@@ -363,5 +355,5 @@ func (s *MagazineScraper) isValidFlipboardURL(rawURL string) bool {
 	}
 
 	return strings.Contains(u.Host, "flipboard.com") &&
-		   (strings.Contains(u.Path, "/@") || strings.Contains(u.Path, "/magazine/"))
+		(strings.Contains(u.Path, "/@") || strings.Contains(u.Path, "/magazine/"))
 }
