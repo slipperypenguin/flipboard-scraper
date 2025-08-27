@@ -24,6 +24,7 @@ type CSVCombiner struct {
 	inputDir  string
 	debug     bool
 	dedupeMap map[string]bool // key: URL+Title for deduplication
+	cleaner   *BradyCleaner   // Brady suffix cleaner
 }
 
 // NewCSVCombiner creates a new CSV combiner
@@ -32,6 +33,7 @@ func NewCSVCombiner(inputDir string, debug bool) *CSVCombiner {
 		inputDir:  inputDir,
 		debug:     debug,
 		dedupeMap: make(map[string]bool),
+		cleaner:   NewBradyCleaner(),
 	}
 }
 
@@ -150,21 +152,21 @@ func (c *CSVCombiner) processCSVFile(filename string) ([]Article, error) {
 			continue
 		}
 
-		// Check for duplicates (URL + Title combination)
-		dedupeKey := c.createDedupeKey(csvRecord.URL, csvRecord.Title)
+		// Clean the URL and title using Brady cleaning logic
+		cleanedURL, cleanedTitle := c.cleaner.CleanBoth(csvRecord.URL, csvRecord.Title)
+
+		// Check for duplicates (URL + Title combination) using cleaned data
+		dedupeKey := c.createDedupeKey(cleanedURL, cleanedTitle)
 		if c.dedupeMap[dedupeKey] {
 			if c.debug {
-				fmt.Printf("  Skipping duplicate: %s\n", csvRecord.Title)
+				fmt.Printf("  Skipping duplicate: %s\n", cleanedTitle)
 			}
 			continue
 		}
 		c.dedupeMap[dedupeKey] = true
 
-		// Clean the URL using existing URL cleaning logic
-		cleanedURL := CleanURL(csvRecord.URL)
-
 		// Convert to Article struct
-		article, err := c.convertToArticle(csvRecord, cleanedURL, filename)
+		article, err := c.convertToArticle(csvRecord, cleanedURL, cleanedTitle, filename)
 		if err != nil {
 			if c.debug {
 				fmt.Printf("  Warning: failed to convert record %d: %v\n", i+2, err)
@@ -203,7 +205,7 @@ func (c *CSVCombiner) createDedupeKey(url, title string) string {
 }
 
 // convertToArticle converts CSVRecord to Article struct
-func (c *CSVCombiner) convertToArticle(csvRecord CSVRecord, cleanedURL, sourceFile string) (Article, error) {
+func (c *CSVCombiner) convertToArticle(csvRecord CSVRecord, cleanedURL, cleanedTitle, sourceFile string) (Article, error) {
 	// Parse date
 	var parsedDate time.Time
 	var err error
@@ -241,10 +243,10 @@ func (c *CSVCombiner) convertToArticle(csvRecord CSVRecord, cleanedURL, sourceFi
 
 	// Create Article struct compatible with existing schema
 	article := Article{
-		Title:       csvRecord.Title,
-		URL:         cleanedURL, // Use cleaned URL as primary URL
-		ActualURL:   cleanedURL, // Same as URL since these are direct URLs
-		Summary:     "",         // Not available in CSV
+		Title:       cleanedTitle, // Use cleaned title
+		URL:         cleanedURL,   // Use cleaned URL as primary URL
+		ActualURL:   cleanedURL,   // Same as URL since these are direct URLs
+		Summary:     "",           // Not available in CSV
 		Date:        parsedDate,
 		Source:      finalSource,
 		ScrapedFrom: fmt.Sprintf("csv:%s", filepath.Base(sourceFile)),
